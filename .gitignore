@@ -4,6 +4,7 @@ tags
 .pytype
 .DS_Store
 .vscode
+.idea
 mypy_report
 docs/build
 docs/source/_build
@@ -114,3 +115,6 @@ venv.bak/
 
 # mypy
 .mypy_cache/
+
+# Snapshot testing report output directory
+tests/snapshot_tests/output
