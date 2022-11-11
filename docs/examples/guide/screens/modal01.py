@@ -5,6 +5,8 @@ from textual.widgets import Static, Header, Footer, Button
 
 
 class QuitScreen(Screen):
+    BINDINGS = [("escape", "app.pop_screen", "Pop screen")]
+
     def compose(self) -> ComposeResult:
         yield Grid(
             Static("Are you sure you want to quit?", id="question"),
