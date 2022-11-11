@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import re
-import sys
-from collections import deque
 from inspect import getfile
 from typing import (
     TYPE_CHECKING,
@@ -35,6 +33,7 @@ from .css.styles import RenderStyles, Styles
 from .css.tokenize import IDENTIFIER
 from .message_pump import MessagePump
 from .timer import Timer
+from .walk import walk_breadth_first, walk_depth_first
 
 if TYPE_CHECKING:
     from .app import App
@@ -42,16 +41,7 @@ if TYPE_CHECKING:
     from .screen import Screen
     from .widget import Widget
 
-if sys.version_info >= (3, 8):
-    from typing import Literal
-else:
-    from typing_extensions import Literal
-
-if sys.version_info >= (3, 10):
-    from typing import TypeAlias
-else:  # pragma: no cover
-    from typing_extensions import TypeAlias
-
+from textual._typing import Literal, TypeAlias
 
 _re_identifier = re.compile(IDENTIFIER)
 
@@ -108,7 +98,7 @@ class DOMNode(MessagePump):
 
     # True if this node inherits the CSS from the base class.
     _inherit_css: ClassVar[bool] = True
-    # List of names of base class (lower cased) that inherit CSS
+    # List of names of base classes that inherit CSS
     _css_type_names: ClassVar[frozenset[str]] = frozenset()
 
     def __init__(
@@ -168,7 +158,7 @@ class DOMNode(MessagePump):
         cls._inherit_css = inherit_css
         css_type_names: set[str] = set()
         for base in cls._css_bases(cls):
-            css_type_names.add(base.__name__.lower())
+            css_type_names.add(base.__name__)
         cls._css_type_names = frozenset(css_type_names)
 
     def get_component_styles(self, name: str) -> RenderStyles:
@@ -190,11 +180,7 @@ class DOMNode(MessagePump):
 
     @property
     def _node_bases(self) -> Iterator[Type[DOMNode]]:
-        """Get the DOMNode bases classes (including self.__class__)
-
-        Returns:
-            Iterator[Type[DOMNode]]: An iterable of DOMNode classes.
-        """
+        """Iterator[Type[DOMNode]]: The DOMNode bases classes (including self.__class__)"""
         # Node bases are in reversed order so that the base class is lower priority
         return self._css_bases(self.__class__)
 
@@ -259,17 +245,16 @@ class DOMNode(MessagePump):
 
     @property
     def parent(self) -> DOMNode | None:
-        """Get the parent node.
-
-        Returns:
-            DOMNode | None: The node which is the direct parent of this node.
-        """
-
+        """DOMNode | None: The parent node."""
         return cast("DOMNode | None", self._parent)
 
     @property
     def screen(self) -> "Screen":
-        """Get the screen that this node is contained within. Note that this may not be the currently active screen within the app."""
+        """Screen: The screen that this node is contained within.
+
+        Note:
+            This may not be the currently active screen within the app.
+        """
         # Get the node by looking up a chain of parents
         # Note that self.screen may not be the same as self.app.screen
         from .screen import Screen
@@ -283,11 +268,7 @@ class DOMNode(MessagePump):
 
     @property
     def id(self) -> str | None:
-        """The ID of this node, or None if the node has no ID.
-
-        Returns:
-            (str | None): A Node ID or None.
-        """
+        """str | None: The ID of this node, or None if the node has no ID."""
         return self._id
 
     @id.setter
@@ -312,11 +293,12 @@ class DOMNode(MessagePump):
 
     @property
     def name(self) -> str | None:
+        """str | None: The name of the node."""
         return self._name
 
     @property
     def css_identifier(self) -> str:
-        """A CSS selector that identifies this DOM node."""
+        """str: A CSS selector that identifies this DOM node."""
         tokens = [self.__class__.__name__]
         if self.id is not None:
             tokens.append(f"#{self.id}")
@@ -324,7 +306,7 @@ class DOMNode(MessagePump):
 
     @property
     def css_identifier_styled(self) -> Text:
-        """A stylized CSS identifier."""
+        """Text: A stylized CSS identifier."""
         tokens = Text.styled(self.__class__.__name__)
         if self.id is not None:
             tokens.append(f"#{self.id}", style="bold")
@@ -337,27 +319,18 @@ class DOMNode(MessagePump):
 
     @property
     def classes(self) -> frozenset[str]:
-        """A frozenset of the current classes set on the widget.
-
-        Returns:
-            frozenset[str]: Set of class names.
-
-        """
+        """frozenset[str]: A frozenset of the current classes set on the widget."""
         return frozenset(self._classes)
 
     @property
     def pseudo_classes(self) -> frozenset[str]:
-        """Get a set of all pseudo classes"""
+        """frozenset[str]: A set of all pseudo classes"""
         pseudo_classes = frozenset({*self.get_pseudo_classes()})
         return pseudo_classes
 
     @property
     def css_path_nodes(self) -> list[DOMNode]:
-        """A list of nodes from the root to this node, forming a "path".
-
-        Returns:
-            list[DOMNode]: List of Nodes, starting with the root and ending with this node.
-        """
+        """list[DOMNode] A list of nodes from the root to this node, forming a "path"."""
         result: list[DOMNode] = [self]
         append = result.append
 
@@ -499,7 +472,7 @@ class DOMNode(MessagePump):
             Style: Rich Style object.
         """
         return Style.combine(
-            node.styles.text_style for node in reversed(self.ancestors)
+            node.styles.text_style for node in reversed(self.ancestors_with_self)
         )
 
     @property
@@ -508,7 +481,7 @@ class DOMNode(MessagePump):
         background = WHITE
         color = BLACK
         style = Style()
-        for node in reversed(self.ancestors):
+        for node in reversed(self.ancestors_with_self):
             styles = node.styles
             if styles.has_rule("background"):
                 background += styles.background
@@ -531,7 +504,7 @@ class DOMNode(MessagePump):
 
         """
         base_background = background = BLACK
-        for node in reversed(self.ancestors):
+        for node in reversed(self.ancestors_with_self):
             styles = node.styles
             if styles.has_rule("background"):
                 base_background = background
@@ -547,7 +520,7 @@ class DOMNode(MessagePump):
         """
         base_background = background = WHITE
         base_color = color = BLACK
-        for node in reversed(self.ancestors):
+        for node in reversed(self.ancestors_with_self):
             styles = node.styles
             if styles.has_rule("background"):
                 base_background = background
@@ -562,8 +535,11 @@ class DOMNode(MessagePump):
         return (base_background, base_color, background, color)
 
     @property
-    def ancestors(self) -> list[DOMNode]:
-        """Get a list of Nodes by tracing ancestors all the way back to App."""
+    def ancestors_with_self(self) -> list[DOMNode]:
+        """list[DOMNode]: A list of Nodes by tracing a path all the way back to App.
+
+        Note: This is inclusive of ``self``.
+        """
         nodes: list[MessagePump | None] = []
         add_node = nodes.append
         node: MessagePump | None = self
@@ -571,6 +547,11 @@ class DOMNode(MessagePump):
             add_node(node)
             node = node._parent
         return cast("list[DOMNode]", nodes)
+
+    @property
+    def ancestors(self) -> list[DOMNode]:
+        """list[DOMNode]: A list of ancestor nodes Nodes by tracing ancestors all the way back to App."""
+        return self.ancestors_with_self[1:]
 
     @property
     def displayed_children(self) -> list[Widget]:
@@ -609,23 +590,18 @@ class DOMNode(MessagePump):
         self.children._append(node)
         node._attach(self)
 
-    def _add_children(self, *nodes: Widget, **named_nodes: Widget) -> None:
+    def _add_children(self, *nodes: Widget) -> None:
         """Add multiple children to this node.
 
         Args:
             *nodes (DOMNode): Positional args should be new DOM nodes.
-            **named_nodes (DOMNode): Keyword args will be assigned the argument name as an ID.
         """
         _append = self.children._append
         for node in nodes:
             node._attach(self)
             _append(node)
-        for node_id, node in named_nodes.items():
-            node._attach(self)
-            _append(node)
-            node.id = node_id
 
-    WalkType = TypeVar("WalkType")
+    WalkType = TypeVar("WalkType", bound="DOMNode")
 
     @overload
     def walk_children(
@@ -670,43 +646,12 @@ class DOMNode(MessagePump):
 
         """
 
-        def walk_depth_first() -> Iterable[DOMNode]:
-            """Walk the tree depth first (parents first)."""
-            stack: list[Iterator[DOMNode]] = [iter(self.children)]
-            pop = stack.pop
-            push = stack.append
-            check_type = filter_type or DOMNode
-
-            if with_self and isinstance(self, check_type):
-                yield self
-            while stack:
-                node = next(stack[-1], None)
-                if node is None:
-                    pop()
-                else:
-                    if isinstance(node, check_type):
-                        yield node
-                    if node.children:
-                        push(iter(node.children))
-
-        def walk_breadth_first() -> Iterable[DOMNode]:
-            """Walk the tree breadth first (children first)."""
-            queue: deque[DOMNode] = deque()
-            popleft = queue.popleft
-            extend = queue.extend
-            check_type = filter_type or DOMNode
-
-            if with_self and isinstance(self, check_type):
-                yield self
-            extend(self.children)
-            while queue:
-                node = popleft()
-                if isinstance(node, check_type):
-                    yield node
-                extend(node.children)
+        check_type = filter_type or DOMNode
 
         node_generator = (
-            walk_depth_first() if method == "depth" else walk_breadth_first()
+            walk_depth_first(self, check_type, with_root=with_self)
+            if method == "depth"
+            else walk_breadth_first(self, check_type, with_root=with_self)
         )
 
         # We want a snapshot of the DOM at this point So that it doesn't
@@ -714,7 +659,7 @@ class DOMNode(MessagePump):
         nodes = list(node_generator)
         if reverse:
             nodes.reverse()
-        return nodes
+        return cast("list[DOMNode]", nodes)
 
     def get_child(self, id: str) -> DOMNode:
         """Return the first child (immediate descendent) of this node with the given ID.
@@ -799,10 +744,7 @@ class DOMNode(MessagePump):
             query_selector = selector.__name__
         query: DOMQuery[Widget] = DOMQuery(self, filter=query_selector)
 
-        if expect_type is None:
-            return query.first()
-        else:
-            return query.first(expect_type)
+        return query.only_one() if expect_type is None else query.only_one(expect_type)
 
     def set_styles(self, css: str | None = None, **update_styles) -> None:
         """Set custom styles on this object."""

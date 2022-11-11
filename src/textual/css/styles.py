@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sys
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -60,11 +59,7 @@ from .types import (
     Visibility,
     TextAlign,
 )
-
-if sys.version_info >= (3, 8):
-    from typing import TypedDict
-else:
-    from typing_extensions import TypedDict
+from .._typing import TypedDict
 
 if TYPE_CHECKING:
     from .._layout import Layout
@@ -561,10 +556,9 @@ class Styles(StylesBase):
         """
         if value is None:
             return self._rules.pop(rule, None) is not None
-        else:
-            current = self._rules.get(rule)
-            self._rules[rule] = value
-            return current != value
+        current = self._rules.get(rule)
+        self._rules[rule] = value
+        return current != value
 
     def get_rule(self, rule: str, default: object = None) -> object:
         return self._rules.get(rule, default)

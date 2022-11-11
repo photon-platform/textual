@@ -155,7 +155,9 @@ class MessagePump(metaclass=MessagePumpMeta):
                 return self._pending_message
             finally:
                 self._pending_message = None
+
         message = await self._message_queue.get()
+
         if message is None:
             self._closed = True
             raise MessagePumpClosed("The message pump is now closed")
@@ -249,7 +251,7 @@ class MessagePump(metaclass=MessagePumpMeta):
         self._timers.add(timer)
         return timer
 
-    def call_later(self, callback: Callable, *args, **kwargs) -> None:
+    def call_after_refresh(self, callback: Callable, *args, **kwargs) -> None:
         """Schedule a callback to run after all messages are processed and the screen
         has been refreshed. Positional and keyword arguments are passed to the callable.
 
@@ -261,13 +263,26 @@ class MessagePump(metaclass=MessagePumpMeta):
         message = messages.InvokeLater(self, partial(callback, *args, **kwargs))
         self.post_message_no_wait(message)
 
+    def call_later(self, callback: Callable, *args, **kwargs) -> None:
+        """Schedule a callback to run after all messages are processed in this object.
+        Positional and keywords arguments are passed to the callable.
+
+        Args:
+            callback (Callable): Callable to call next.
+        """
+        message = events.Callback(self, callback=partial(callback, *args, **kwargs))
+        self.post_message_no_wait(message)
+
     def _on_invoke_later(self, message: messages.InvokeLater) -> None:
         # Forward InvokeLater message to the Screen
         self.app.screen._invoke_later(message.callback)
 
     def _close_messages_no_wait(self) -> None:
-        """Request the message queue to exit."""
-        self._message_queue.put_nowait(None)
+        """Request the message queue to immediately exit."""
+        self._message_queue.put_nowait(messages.CloseMessages(sender=self))
+
+    async def _on_close_messages(self, message: messages.CloseMessages) -> None:
+        await self._close_messages()
 
     async def _close_messages(self) -> None:
         """Close message queue, and optionally wait for queue to finish processing."""
@@ -278,6 +293,8 @@ class MessagePump(metaclass=MessagePumpMeta):
         for timer in stop_timers:
             await timer.stop()
         self._timers.clear()
+        await self._message_queue.put(events.Unmount(sender=self))
+        Reactive._reset_object(self)
         await self._message_queue.put(None)
         if self._task is not None and asyncio.current_task() != self._task:
             # Ensure everything is closed before returning
@@ -285,7 +302,8 @@ class MessagePump(metaclass=MessagePumpMeta):
 
     def _start_messages(self) -> None:
         """Start messages task."""
-        self._task = asyncio.create_task(self._process_messages())
+        if self.app._running:
+            self._task = asyncio.create_task(self._process_messages())
 
     async def _process_messages(self) -> None:
         self._running = True
@@ -370,8 +388,6 @@ class MessagePump(metaclass=MessagePumpMeta):
                                 self.app._handle_exception(error)
                                 break
 
-        log("CLOSED", self)
-
     async def _dispatch_message(self, message: Message) -> None:
         """Dispatch a message received from the message queue.
 
@@ -424,6 +440,7 @@ class MessagePump(metaclass=MessagePumpMeta):
         handler_name = message._handler_name
 
         # Look through the MRO to find a handler
+        dispatched = False
         for cls, method in self._get_dispatch_methods(handler_name, message):
             log.event.verbosity(message.verbose)(
                 message,
@@ -431,7 +448,10 @@ class MessagePump(metaclass=MessagePumpMeta):
                 self,
                 f"method=<{cls.__name__}.{handler_name}>",
             )
+            dispatched = True
             await invoke(method, message)
+        if not dispatched:
+            log.event.verbosity(message.verbose)(message, ">>>", self, "method=None")
 
         # Bubble messages up the DOM (if enabled on the message)
         if message.bubble and self._parent and not message._stop_propagation:
