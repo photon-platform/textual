@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sys
 from typing import Iterable, Iterator
 
 import rich.repr
@@ -12,19 +11,15 @@ from ._callback import invoke
 from ._compositor import Compositor, MapGeometry
 from .timer import Timer
 from ._types import CallbackType
-from .dom import DOMNode
 from .geometry import Offset, Region, Size
+from ._typing import Final
 from .reactive import Reactive
 from .renderables.blank import Blank
 from .widget import Widget
 
-if sys.version_info >= (3, 8):
-    from typing import Final
-else:
-    from typing_extensions import Final
 
-# Screen updates will be batched so that they don't happen more often than 60 times per second:
-UPDATE_PERIOD: Final = 1 / 60
+# Screen updates will be batched so that they don't happen more often than 120 times per second:
+UPDATE_PERIOD: Final[float] = 1 / 120
 
 
 @rich.repr.auto
@@ -61,7 +56,12 @@ class Screen(Widget):
     @property
     def is_current(self) -> bool:
         """Check if this screen is current (i.e. visible to user)."""
-        return self.app.screen is self
+        from .app import ScreenStackError
+
+        try:
+            return self.app.screen is self
+        except ScreenStackError:
+            return False
 
     @property
     def update_timer(self) -> Timer:
@@ -169,9 +169,8 @@ class Screen(Widget):
             else:
                 if node.is_container and node.can_focus_children:
                     push(iter(node.focusable_children))
-                else:
-                    if node.can_focus:
-                        add_widget(node)
+                if node.can_focus:
+                    add_widget(node)
 
         return widgets
 
@@ -334,10 +333,10 @@ class Screen(Widget):
             self._compositor.update_widgets(self._dirty_widgets)
             self.app._display(self, self._compositor.render())
             self._dirty_widgets.clear()
-
-        self.update_timer.pause()
         if self._callbacks:
             self.post_message_no_wait(events.InvokeCallbacks(self))
+
+        self.update_timer.pause()
 
     async def _on_invoke_callbacks(self, event: events.InvokeCallbacks) -> None:
         """Handle PostScreenUpdate events, which are sent after the screen is updated"""
@@ -347,6 +346,8 @@ class Screen(Widget):
         """If there are scheduled callbacks to run, call them and clear
         the callback queue."""
         if self._callbacks:
+            display_update = self._compositor.render()
+            self.app._display(self, display_update)
             callbacks = self._callbacks[:]
             self._callbacks.clear()
             for callback in callbacks:
@@ -403,8 +404,7 @@ class Screen(Widget):
             self.app._handle_exception(error)
             return
         display_update = self._compositor.render(full=full)
-        if display_update is not None:
-            self.app._display(self, display_update)
+        self.app._display(self, display_update)
 
     async def _on_update(self, message: messages.Update) -> None:
         message.stop()

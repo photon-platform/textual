@@ -13,7 +13,7 @@ from ..widget import Widget
 
 @rich.repr.auto
 class Footer(Widget):
-    """A simple header widget which docks itself to the top of the parent container."""
+    """A simple footer widget which docks itself to the bottom of the parent container."""
 
     DEFAULT_CSS = """
     Footer {
@@ -118,6 +118,10 @@ class Footer(Widget):
             )
             text.append_text(key_text)
         return text
+
+    def _on_styles_updated(self) -> None:
+        self._key_text = None
+        self.refresh()
 
     def post_render(self, renderable):
         return renderable
