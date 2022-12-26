@@ -61,12 +61,13 @@ class Input(Widget, can_focus=True):
         border: tall $background;
         width: 100%;
         height: 1;
+        min-height: 1;
     }
     Input.-disabled {
         opacity: 0.6;
     }
     Input:focus {
-       border: tall $accent;
+        border: tall $accent;
     }
     Input>.input--cursor {
         background: $surface;
@@ -176,6 +177,10 @@ class Input(Widget, can_focus=True):
             if self.has_focus:
                 cursor_style = self.get_component_rich_style("input--cursor")
                 if self._cursor_visible:
+                    # If the placeholder is empty, there's no characters to stylise
+                    # to make the cursor flash, so use a single space character
+                    if len(placeholder) == 0:
+                        placeholder = Text(" ")
                     placeholder.stylize(cursor_style, 0, 1)
             return placeholder
         return _InputRenderable(self, self._cursor_visible)
@@ -228,8 +233,8 @@ class Input(Widget, can_focus=True):
             return
         elif event.is_printable:
             event.stop()
-            assert event.char is not None
-            self.insert_text_at_cursor(event.char)
+            assert event.character is not None
+            self.insert_text_at_cursor(event.character)
             event.prevent_default()
 
     def on_paste(self, event: events.Paste) -> None:
@@ -309,7 +314,12 @@ class Input(Widget, can_focus=True):
         await self.emit(self.Submitted(self, self.value))
 
     class Changed(Message, bubble=True):
-        """Value was changed."""
+        """Value was changed.
+
+        Attributes:
+            value (str): The value that the input was changed to.
+            input (Input): The `Input` widget that was changed.
+        """
 
         def __init__(self, sender: Input, value: str) -> None:
             super().__init__(sender)
@@ -317,7 +327,12 @@ class Input(Widget, can_focus=True):
             self.input = sender
 
     class Submitted(Message, bubble=True):
-        """Value was updated via enter key or blur."""
+        """Sent when the enter key is pressed within an `Input`.
+
+        Attributes:
+            value (str): The value of the `Input` being submitted..
+            input (Input): The `Input` widget that is being submitted.
+        """
 
         def __init__(self, sender: Input, value: str) -> None:
             super().__init__(sender)

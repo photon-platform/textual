@@ -33,8 +33,8 @@ def get_box_model(
         viewport (Size): The viewport size.
         width_fraction (Fraction): A fraction used for 1 `fr` unit on the width dimension.
         height_fraction (Fraction):A fraction used for 1 `fr` unit on the height dimension.
-        get_auto_width (Callable): A callable which accepts container size and parent size and returns a width.
-        get_auto_height (Callable): A callable which accepts container size and parent size and returns a height.
+        get_content_width (Callable[[Size, Size], int]): A callable which accepts container size and parent size and returns a width.
+        get_content_height (Callable[[Size, Size, int], int]): A callable which accepts container size and parent size and returns a height.
 
     Returns:
         BoxModel: A tuple with the size of the content area and margin.
@@ -62,10 +62,12 @@ def get_box_model(
         content_width = Fraction(
             get_content_width(content_container - styles.margin.totals, viewport)
         )
+        if styles.scrollbar_gutter == "stable" and styles.overflow_x == "auto":
+            content_width += styles.scrollbar_size_vertical
     else:
         # An explicit width
         styles_width = styles.width
-        content_width = styles_width.resolve_dimension(
+        content_width = styles_width.resolve(
             sizing_container - styles.margin.totals, viewport, width_fraction
         )
         if is_border_box and styles_width.excludes_border:
@@ -73,14 +75,14 @@ def get_box_model(
 
     if styles.min_width is not None:
         # Restrict to minimum width, if set
-        min_width = styles.min_width.resolve_dimension(
+        min_width = styles.min_width.resolve(
             content_container, viewport, width_fraction
         )
         content_width = max(content_width, min_width)
 
     if styles.max_width is not None:
         # Restrict to maximum width, if set
-        max_width = styles.max_width.resolve_dimension(
+        max_width = styles.max_width.resolve(
             content_container, viewport, width_fraction
         )
         if is_border_box:
@@ -97,10 +99,12 @@ def get_box_model(
         content_height = Fraction(
             get_content_height(content_container, viewport, int(content_width))
         )
+        if styles.scrollbar_gutter == "stable" and styles.overflow_y == "auto":
+            content_height += styles.scrollbar_size_horizontal
     else:
         styles_height = styles.height
         # Explicit height set
-        content_height = styles_height.resolve_dimension(
+        content_height = styles_height.resolve(
             sizing_container - styles.margin.totals, viewport, height_fraction
         )
         if is_border_box and styles_height.excludes_border:
@@ -108,19 +112,19 @@ def get_box_model(
 
     if styles.min_height is not None:
         # Restrict to minimum height, if set
-        min_height = styles.min_height.resolve_dimension(
+        min_height = styles.min_height.resolve(
             content_container, viewport, height_fraction
         )
         content_height = max(content_height, min_height)
 
     if styles.max_height is not None:
         # Restrict maximum height, if set
-        max_height = styles.max_height.resolve_dimension(
+        max_height = styles.max_height.resolve(
             content_container, viewport, height_fraction
         )
         content_height = min(content_height, max_height)
 
-    content_height = max(Fraction(1), content_height)
+    content_height = max(Fraction(0), content_height)
     model = BoxModel(
         content_width + gutter.width, content_height + gutter.height, margin
     )

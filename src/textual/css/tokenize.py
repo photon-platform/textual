@@ -49,7 +49,7 @@ expect_root_scope = Expect(
     selector_start_id=r"\#" + IDENTIFIER,
     selector_start_class=r"\." + IDENTIFIER,
     selector_start_universal=r"\*",
-    selector_start=r"[a-zA-Z_\-]+",
+    selector_start=IDENTIFIER,
     variable_name=rf"{VARIABLE_REF}:",
 ).expect_eof(True)
 
@@ -197,18 +197,3 @@ def tokenize_values(values: dict[str, str]) -> dict[str, list[Token]]:
         name: list(tokenize_value(value, "__name__")) for name, value in values.items()
     }
     return value_tokens
-
-
-if __name__ == "__main__":
-    from rich import print
-
-    css = """#something {
-
-        color: rgb(10,12,23)
-    }
-    """
-    # transition: offset 500 in_out_cubic;
-    tokens = tokenize(css, __name__)
-    print(list(tokens))
-
-    print(tokenize_values({"primary": "rgb(10,20,30)", "secondary": "#ff00ff"}))

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from functools import lru_cache
+from sys import intern
 from typing import TYPE_CHECKING, Callable, Iterable, List
 
 from rich.segment import Segment
@@ -52,8 +54,22 @@ def style_links(
     return segments
 
 
+@lru_cache(1024 * 8)
+def make_blank(width, style: Style) -> Segment:
+    """Make a blank segment.
+
+    Args:
+        width (_type_): Width of blank.
+        style (Style): Style of blank.
+
+    Returns:
+        Segment: A single segment
+    """
+    return Segment(intern(" " * width), style)
+
+
 class StylesCache:
-    """Responsible for rendering CSS Styles and keeping a cached of rendered lines.
+    """Responsible for rendering CSS Styles and keeping a cache of rendered lines.
 
     The render method applies border, outline, and padding set in the Styles object to widget content.
 
@@ -182,7 +198,7 @@ class StylesCache:
         if crop is None:
             crop = size.region
 
-        width, height = size
+        width, _height = size
         if width != self._width:
             self.clear()
             self._width = width
@@ -319,20 +335,20 @@ class StylesCache:
             right_style = from_color(color=(background + border_right_color).rich_color)
             right = get_box(border_right, inner, outer, right_style)[1][2]
             if border_left and border_right:
-                line = [left, Segment(" " * (width - 2), background_style), right]
+                line = [left, make_blank(width - 2, background_style), right]
             elif border_left:
-                line = [left, Segment(" " * (width - 1), background_style)]
+                line = [left, make_blank(width - 1, background_style)]
             elif border_right:
-                line = [Segment(" " * (width - 1), background_style), right]
+                line = [make_blank(width - 1, background_style), right]
             else:
-                line = [Segment(" " * width, background_style)]
+                line = [make_blank(width, background_style)]
         else:
             # Content with border and padding (C)
             content_y = y - gutter.top
             if content_y < content_height:
                 line = render_content_line(y - gutter.top)
             else:
-                line = [Segment(" " * content_width, inner)]
+                line = [make_blank(content_width, inner)]
             if inner:
                 line = Segment.apply_style(line, inner)
             line = line_pad(line, pad_left, pad_right, inner)

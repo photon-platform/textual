@@ -18,6 +18,7 @@ from time import perf_counter
 from typing import (
     TYPE_CHECKING,
     Any,
+    Callable,
     Generic,
     Iterable,
     List,
@@ -25,6 +26,7 @@ from typing import (
     TypeVar,
     Union,
     cast,
+    overload,
 )
 from weakref import WeakSet, WeakValueDictionary
 
@@ -36,7 +38,7 @@ from rich.protocol import is_renderable
 from rich.segment import Segment, Segments
 from rich.traceback import Traceback
 
-from . import Logger, LogGroup, LogVerbosity, actions, events, log, messages
+from . import actions, Logger, LogGroup, LogVerbosity, events, log, messages
 from ._animator import DEFAULT_EASING, Animatable, Animator, EasingFunction
 from ._ansi_sequences import SYNC_END, SYNC_START
 from ._callback import invoke
@@ -44,7 +46,9 @@ from ._context import active_app
 from ._event_broker import NoHandler, extract_handler_actions
 from ._filter import LineFilter, Monochrome
 from ._path import _make_path_object_relative
-from ._typing import TypeAlias, Final
+from ._typing import Final, TypeAlias
+from .actions import SkipAction
+from .await_remove import AwaitRemove
 from .binding import Binding, Bindings
 from .css.query import NoMatches
 from .css.stylesheet import Stylesheet
@@ -55,12 +59,13 @@ from .drivers.headless_driver import HeadlessDriver
 from .features import FeatureFlag, parse_features
 from .file_monitor import FileMonitor
 from .geometry import Offset, Region, Size
-from .keys import REPLACED_KEYS
+from .keys import REPLACED_KEYS, _get_key_display
 from .messages import CallbackType
 from .reactive import Reactive
 from .renderables.blank import Blank
 from .screen import Screen
 from .widget import AwaitMount, Widget
+
 
 if TYPE_CHECKING:
     from .devtools.client import DevtoolsClient
@@ -100,7 +105,6 @@ DEFAULT_COLORS = {
 
 ComposeResult = Iterable[Widget]
 RenderResult = RenderableType
-
 
 AutopilotCallbackType: TypeAlias = "Callable[[Pilot], Coroutine[Any, Any, None]]"
 
@@ -228,11 +232,17 @@ class App(Generic[ReturnType], DOMNode):
     }
     """
 
-    SCREENS: dict[str, Screen] = {}
+    SCREENS: dict[str, Screen | Callable[[], Screen]] = {}
     _BASE_PATH: str | None = None
     CSS_PATH: CSSPathType = None
     TITLE: str | None = None
     SUB_TITLE: str | None = None
+
+    BINDINGS = [
+        Binding("ctrl+c", "quit", "Quit", show=False, priority=True),
+        Binding("tab", "focus_next", "Focus Next", show=False),
+        Binding("shift+tab", "focus_previous", "Focus Previous", show=False),
+    ]
 
     title: Reactive[str] = Reactive("")
     sub_title: Reactive[str] = Reactive("")
@@ -295,7 +305,6 @@ class App(Generic[ReturnType], DOMNode):
 
         self._logger = Logger(self._log)
 
-        self._bindings.bind("ctrl+c", "quit", show=False, universal=True)
         self._refresh_required = False
 
         self.design = DEFAULT_COLORS
@@ -330,7 +339,7 @@ class App(Generic[ReturnType], DOMNode):
         self._registry: WeakSet[DOMNode] = WeakSet()
 
         self._installed_screens: WeakValueDictionary[
-            str, Screen
+            str, Screen | Callable[[], Screen]
         ] = WeakValueDictionary()
         self._installed_screens.update(**self.SCREENS)
 
@@ -345,6 +354,7 @@ class App(Generic[ReturnType], DOMNode):
                 self.devtools = DevtoolsClient()
 
         self._return_value: ReturnType | None = None
+        self._exit = False
 
         self.css_monitor = (
             FileMonitor(self.css_path, self._on_css_change)
@@ -352,6 +362,9 @@ class App(Generic[ReturnType], DOMNode):
             else None
         )
         self._screenshot: str | None = None
+        self._dom_lock = asyncio.Lock()
+        self._dom_ready = False
+        self.set_class(self.dark, "-dark-mode")
 
     @property
     def return_value(self) -> ReturnType | None:
@@ -409,14 +422,20 @@ class App(Generic[ReturnType], DOMNode):
         """list[Screen]: A *copy* of the screen stack."""
         return self._screen_stack.copy()
 
-    def exit(self, result: ReturnType | None = None) -> None:
+    def exit(
+        self, result: ReturnType | None = None, message: RenderableType | None = None
+    ) -> None:
         """Exit the app, and return the supplied result.
 
         Args:
             result (ReturnType | None, optional): Return value. Defaults to None.
+            message (RenderableType | None): Optional message to display on exit.
         """
+        self._exit = True
         self._return_value = result
         self.post_message_no_wait(messages.ExitApp(sender=self))
+        if message:
+            self._exit_renderables.append(message)
 
     @property
     def focused(self) -> Widget | None:
@@ -457,7 +476,14 @@ class App(Generic[ReturnType], DOMNode):
         """Watches the dark bool."""
         self.set_class(dark, "-dark-mode")
         self.set_class(not dark, "-light-mode")
-        self.refresh_css()
+        try:
+            self.refresh_css()
+        except ScreenStackError:
+            # It's possible that `dark` can be set before we have a default
+            # screen, in an app's `on_load`, for example. So let's eat the
+            # ScreenStackError -- the above styles will be handled once the
+            # screen is spun up anyway.
+            pass
 
     def get_driver_class(self) -> Type[Driver]:
         """Get a driver class for this platform.
@@ -667,6 +693,22 @@ class App(Generic[ReturnType], DOMNode):
             keys, action, description, show=show, key_display=key_display
         )
 
+    def get_key_display(self, key: str) -> str:
+        """For a given key, return how it should be displayed in an app
+        (e.g. in the Footer widget).
+        By key, we refer to the string used in the "key" argument for
+        a Binding instance. By overriding this method, you can ensure that
+        keys are displayed consistently throughout your app, without
+        needing to add a key_display to every binding.
+
+        Args:
+            key (str): The binding key string.
+
+        Returns:
+            str: The display string for the input key.
+        """
+        return _get_key_display(key)
+
     async def _press_keys(self, keys: Iterable[str]) -> None:
         """A task to send key events."""
         app = self
@@ -704,7 +746,7 @@ class App(Generic[ReturnType], DOMNode):
                 #  This conditional sleep can be removed after that issue is closed.
                 if key == "tab":
                     await asyncio.sleep(0.05)
-                await asyncio.sleep(0.02)
+                await asyncio.sleep(0.025)
         await app._animator.wait_for_idle()
 
     @asynccontextmanager
@@ -803,9 +845,11 @@ class App(Generic[ReturnType], DOMNode):
                 terminal_size=size,
             )
         finally:
-            if auto_pilot_task is not None:
-                await auto_pilot_task
-            await app._shutdown()
+            try:
+                if auto_pilot_task is not None:
+                    await auto_pilot_task
+            finally:
+                await app._shutdown()
 
         return app.return_value
 
@@ -871,21 +915,76 @@ class App(Generic[ReturnType], DOMNode):
     def render(self) -> RenderableType:
         return Blank(self.styles.background)
 
-    def get_child(self, id: str) -> DOMNode:
+    ExpectType = TypeVar("ExpectType", bound=Widget)
+
+    @overload
+    def get_child_by_id(self, id: str) -> Widget:
+        ...
+
+    @overload
+    def get_child_by_id(self, id: str, expect_type: type[ExpectType]) -> ExpectType:
+        ...
+
+    def get_child_by_id(
+        self, id: str, expect_type: type[ExpectType] | None = None
+    ) -> ExpectType | Widget:
         """Shorthand for self.screen.get_child(id: str)
         Returns the first child (immediate descendent) of this DOMNode
         with the given ID.
 
         Args:
             id (str): The ID of the node to search for.
+            expect_type (type | None, optional): Require the object be of the supplied type, or None for any type.
+                Defaults to None.
 
         Returns:
-            DOMNode: The first child of this node with the specified ID.
+            ExpectType | Widget: The first child of this node with the specified ID.
 
         Raises:
             NoMatches: if no children could be found for this ID
+            WrongType: if the wrong type was found.
         """
-        return self.screen.get_child(id)
+        return (
+            self.screen.get_child_by_id(id)
+            if expect_type is None
+            else self.screen.get_child_by_id(id, expect_type)
+        )
+
+    @overload
+    def get_widget_by_id(self, id: str) -> Widget:
+        ...
+
+    @overload
+    def get_widget_by_id(self, id: str, expect_type: type[ExpectType]) -> ExpectType:
+        ...
+
+    def get_widget_by_id(
+        self, id: str, expect_type: type[ExpectType] | None = None
+    ) -> ExpectType | Widget:
+        """Shorthand for self.screen.get_widget_by_id(id)
+        Return the first descendant widget with the given ID.
+
+        Performs a breadth-first search rooted at the current screen.
+        It will not return the Screen if that matches the ID.
+        To get the screen, use `self.screen`.
+
+        Args:
+            id (str): The ID to search for in the subtree
+            expect_type (type | None, optional): Require the object be of the supplied type, or None for any type.
+                Defaults to None.
+
+        Returns:
+            ExpectType | Widget: The first descendant encountered with this ID.
+
+        Raises:
+            NoMatches: if no children could be found for this ID
+            WrongType: if the wrong type was found.
+        """
+        return (
+            self.screen.get_widget_by_id(id)
+            if expect_type is None
+            else self.screen.get_widget_by_id(id, expect_type)
+        )
 
     def update_styles(self, node: DOMNode | None = None) -> None:
         """Request update of styles.
@@ -977,12 +1076,15 @@ class App(Generic[ReturnType], DOMNode):
                 next_screen = self._installed_screens[screen]
             except KeyError:
                 raise KeyError(f"No screen called {screen!r} installed") from None
+            if callable(next_screen):
+                next_screen = next_screen()
+                self._installed_screens[screen] = next_screen
         else:
             next_screen = screen
         return next_screen
 
     def _get_screen(self, screen: Screen | str) -> tuple[Screen, AwaitMount]:
-        """Get an installed screen and a await mount object.
+        """Get an installed screen and an AwaitMount object.
 
         If the screen isn't running, it will be registered before it is run.
 
@@ -999,9 +1101,9 @@ class App(Generic[ReturnType], DOMNode):
         _screen = self.get_screen(screen)
         if not _screen.is_running:
             widgets = self._register(self, _screen)
-            return (_screen, AwaitMount(widgets))
+            return (_screen, AwaitMount(_screen, widgets))
         else:
-            return (_screen, AwaitMount([]))
+            return (_screen, AwaitMount(_screen, []))
 
     def _replace_screen(self, screen: Screen) -> Screen:
         """Handle the replaced screen.
@@ -1047,7 +1149,7 @@ class App(Generic[ReturnType], DOMNode):
             self.screen.post_message_no_wait(events.ScreenResume(self))
             self.log.system(f"{self.screen} is current (SWITCHED)")
             return await_mount
-        return AwaitMount([])
+        return AwaitMount(self.screen, [])
 
     def install_screen(self, screen: Screen, name: str | None = None) -> AwaitMount:
         """Install a screen.
@@ -1291,11 +1393,14 @@ class App(Generic[ReturnType], DOMNode):
 
                 await self.animator.start()
 
+            except Exception:
+                await self.animator.stop()
+                raise
+
             finally:
+                self._running = True
                 await self._ready()
                 await invoke_ready_callback()
-
-            self._running = True
 
             try:
                 await self._process_messages_loop()
@@ -1303,10 +1408,11 @@ class App(Generic[ReturnType], DOMNode):
                 pass
             finally:
                 self._running = False
-                for timer in list(self._timers):
-                    await timer.stop()
-
-            await self.animator.stop()
+                try:
+                    await self.animator.stop()
+                finally:
+                    for timer in list(self._timers):
+                        await timer.stop()
 
         self._running = True
         try:
@@ -1320,28 +1426,29 @@ class App(Generic[ReturnType], DOMNode):
             )
             driver = self._driver = driver_class(self.console, self, size=terminal_size)
 
-            driver.start_application_mode()
-            try:
-                if headless:
-                    await run_process_messages()
-                else:
-                    if self.devtools is not None:
-                        devtools = self.devtools
-                        assert devtools is not None
-                        from .devtools.redirect_output import StdoutRedirector
-
-                        redirector = StdoutRedirector(devtools)
-                        with redirect_stderr(redirector):
-                            with redirect_stdout(redirector):  # type: ignore
-                                await run_process_messages()
+            if not self._exit:
+                driver.start_application_mode()
+                try:
+                    if headless:
+                        await run_process_messages()
                     else:
-                        null_file = _NullFile()
-                        with redirect_stderr(null_file):
-                            with redirect_stdout(null_file):
-                                await run_process_messages()
+                        if self.devtools is not None:
+                            devtools = self.devtools
+                            assert devtools is not None
+                            from .devtools.redirect_output import StdoutRedirector
 
-            finally:
-                driver.stop_application_mode()
+                            redirector = StdoutRedirector(devtools)
+                            with redirect_stderr(redirector):
+                                with redirect_stdout(redirector):  # type: ignore
+                                    await run_process_messages()
+                        else:
+                            null_file = _NullFile()
+                            with redirect_stderr(null_file):
+                                with redirect_stdout(null_file):
+                                    await run_process_messages()
+
+                finally:
+                    driver.stop_application_mode()
         except Exception as error:
             self._handle_exception(error)
 
@@ -1387,7 +1494,7 @@ class App(Generic[ReturnType], DOMNode):
             nodes: set[DOMNode] = {
                 child
                 for node in self._require_stylesheet_update
-                for child in node.walk_children()
+                for child in node.walk_children(with_self=True)
             }
             self._require_stylesheet_update.clear()
             self.stylesheet.update_nodes(nodes, animate=True)
@@ -1415,7 +1522,6 @@ class App(Generic[ReturnType], DOMNode):
 
         # If we don't already know about this widget...
         if child not in self._registry:
-
             # Now to figure out where to place it. If we've got a `before`...
             if before is not None:
                 # ...it's safe to NodeList._insert before that location.
@@ -1478,7 +1584,6 @@ class App(Generic[ReturnType], DOMNode):
                 if widget.children:
                     self._register(widget, *widget.children)
                 apply_stylesheet(widget)
-
         return list(widgets)
 
     def _unregister(self, widget: Widget) -> None:
@@ -1532,7 +1637,7 @@ class App(Generic[ReturnType], DOMNode):
 
         # Close pre-defined screens
         for screen in self.SCREENS.values():
-            if screen._running:
+            if isinstance(screen, Screen) and screen._running:
                 await self._prune_node(screen)
 
         # Close any remaining nodes
@@ -1644,22 +1749,23 @@ class App(Generic[ReturnType], DOMNode):
             ]
         return namespace_bindings
 
-    async def check_bindings(self, key: str, universal: bool = False) -> bool:
+    async def check_bindings(self, key: str, priority: bool = False) -> bool:
         """Handle a key press.
 
         Args:
-            key (str): A key
-            universal (bool): Check universal keys if True, otherwise non-universal keys.
+            key (str): A key.
+            priority (bool): If `True` check from `App` down, otherwise from focused up.
 
         Returns:
             bool: True if the key was handled by a binding, otherwise False
         """
-
-        for namespace, bindings in self._binding_chain:
+        for namespace, bindings in (
+            reversed(self._binding_chain) if priority else self._binding_chain
+        ):
             binding = bindings.keys.get(key)
-            if binding is not None and binding.universal == universal:
-                await self.action(binding.action, default_namespace=namespace)
-                return True
+            if binding is not None and binding.priority == priority:
+                if await self.action(binding.action, namespace):
+                    return True
         return False
 
     async def on_event(self, event: events.Event) -> None:
@@ -1677,7 +1783,7 @@ class App(Generic[ReturnType], DOMNode):
                 self.mouse_position = Offset(event.x, event.y)
                 await self.screen._forward_event(event)
             elif isinstance(event, events.Key):
-                if not await self.check_bindings(event.key, universal=True):
+                if not await self.check_bindings(event.key, priority=True):
                     forward_target = self.focused or self.screen
                     await forward_target._forward_event(event)
             else:
@@ -1728,32 +1834,41 @@ class App(Generic[ReturnType], DOMNode):
     async def _dispatch_action(
         self, namespace: object, action_name: str, params: Any
     ) -> bool:
+        """Dispatch an action to an action method.
+
+        Args:
+            namespace (object): Namespace (object) of action.
+            action_name (str): Name of the action.
+            params (Any): Action parameters.
+
+        Returns:
+            bool: True if handled, otherwise False.
+        """
+        _rich_traceback_guard = True
+
         log(
             "<action>",
             namespace=namespace,
             action_name=action_name,
             params=params,
         )
-        _rich_traceback_guard = True
 
-        public_method_name = f"action_{action_name}"
-        private_method_name = f"_{public_method_name}"
-
-        private_method = getattr(namespace, private_method_name, None)
-        public_method = getattr(namespace, public_method_name, None)
-
-        if private_method is None and public_method is None:
+        try:
+            private_method = getattr(namespace, f"_action_{action_name}", None)
+            if callable(private_method):
+                await invoke(private_method, *params)
+                return True
+            public_method = getattr(namespace, f"action_{action_name}", None)
+            if callable(public_method):
+                await invoke(public_method, *params)
+                return True
             log(
-                f"<action> {action_name!r} has no target. Couldn't find methods {public_method_name!r} or {private_method_name!r}"
+                f"<action> {action_name!r} has no target."
+                f" Could not find methods '_action_{action_name}' or 'action_{action_name}'"
             )
-
-        if callable(private_method):
-            await invoke(private_method, *params)
-            return True
-        elif callable(public_method):
-            await invoke(public_method, *params)
-            return True
-
+        except SkipAction:
+            # The action method raised this to explicitly not handle the action
+            log("<action> {action_name!r} skipped.")
         return False
 
     async def _broker_event(
@@ -1764,7 +1879,7 @@ class App(Generic[ReturnType], DOMNode):
         Args:
             event_name (str): _description_
             event (events.Event): An event object.
-            default_namespace (object | None): TODO: _description_
+            default_namespace (object | None): The default namespace, where one isn't supplied.
 
         Returns:
             bool: True if an action was processed.
@@ -1794,13 +1909,8 @@ class App(Generic[ReturnType], DOMNode):
         message.stop()
 
     async def _on_key(self, event: events.Key) -> None:
-        if event.key == "tab":
-            self.screen.focus_next()
-        elif event.key == "shift+tab":
-            self.screen.focus_previous()
-        else:
-            if not (await self.check_bindings(event.key)):
-                await self.dispatch_key(event)
+        if not (await self.check_bindings(event.key)):
+            await self.dispatch_key(event)
 
     async def _on_shutdown_request(self, event: events.ShutdownRequest) -> None:
         log("shutdown request")
@@ -1870,24 +1980,6 @@ class App(Generic[ReturnType], DOMNode):
         # prune event.
         return pruned_remove
 
-    async def _on_prune(self, event: events.Prune) -> None:
-        """Handle a prune event.
-
-        Args:
-            event (events.Prune): The prune event.
-        """
-
-        try:
-            # Prune all the widgets.
-            for widget in event.widgets:
-                await self._prune_node(widget)
-        finally:
-            # Finally, flag that we're done.
-            event.finished_flag.set()
-
-        # Flag that the layout needs refreshing.
-        self.refresh(layout=True)
-
     def _walk_children(self, root: Widget) -> Iterable[list[Widget]]:
         """Walk children depth first, generating widgets and a list of their siblings.
 
@@ -1906,6 +1998,48 @@ class App(Generic[ReturnType], DOMNode):
             for child in widget.children:
                 push(child)
 
+    def _remove_nodes(self, widgets: list[Widget]) -> AwaitRemove:
+        """Remove nodes from DOM, and return an awaitable that awaits cleanup.
+
+        Args:
+            widgets (list[Widget]): List of nodes to remvoe.
+
+        Returns:
+            AwaitRemove: Awaitable that returns when the nodes have been fully removed.
+        """
+
+        async def prune_widgets_task(
+            widgets: list[Widget], finished_event: asyncio.Event
+        ) -> None:
+            """Prune widgets as a background task.
+
+            Args:
+                widgets (list[Widget]): Widgets to prune.
+                finished_event (asyncio.Event): Event to set when complete.
+            """
+            try:
+                await self._prune_nodes(widgets)
+            finally:
+                finished_event.set()
+                self.refresh(layout=True)
+
+        removed_widgets = self._detach_from_dom(widgets)
+
+        finished_event = asyncio.Event()
+        asyncio.create_task(prune_widgets_task(removed_widgets, finished_event))
+
+        return AwaitRemove(finished_event)
+
+    async def _prune_nodes(self, widgets: list[Widget]) -> None:
+        """Remove nodes and children.
+
+        Args:
+            widgets (Widget): _description_
+        """
+        async with self._dom_lock:
+            for widget in widgets:
+                await self._prune_node(widget)
+
     async def _prune_node(self, root: Widget) -> None:
         """Remove a node and its children. Children are removed before parents.
 
@@ -1921,7 +2055,7 @@ class App(Generic[ReturnType], DOMNode):
         for children in reversed(node_children):
             # Closing children can be done asynchronously.
             close_messages = [
-                child._close_messages() for child in children if child._running
+                child._close_messages(wait=True) for child in children if child._running
             ]
             # TODO: What if a message pump refuses to exit?
             if close_messages:
@@ -1929,11 +2063,12 @@ class App(Generic[ReturnType], DOMNode):
                 for child in children:
                     self._unregister(child)
 
-        await root._close_messages()
+        await root._close_messages(wait=False)
         self._unregister(root)
 
     async def action_check_bindings(self, key: str) -> None:
-        await self.check_bindings(key)
+        if not await self.check_bindings(key, priority=True):
+            await self.check_bindings(key, priority=False)
 
     async def action_quit(self) -> None:
         """Quit the app as soon as possible."""
@@ -1994,6 +2129,14 @@ class App(Generic[ReturnType], DOMNode):
 
     async def action_toggle_class(self, selector: str, class_name: str) -> None:
         self.screen.query(selector).toggle_class(class_name)
+
+    def action_focus_next(self) -> None:
+        """Focus the next widget."""
+        self.screen.focus_next()
+
+    def action_focus_previous(self) -> None:
+        """Focus the previous widget."""
+        self.screen.focus_previous()
 
     def _on_terminal_supports_synchronized_output(
         self, message: messages.TerminalSupportsSynchronizedOutput

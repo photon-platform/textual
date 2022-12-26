@@ -176,6 +176,7 @@ class LinuxDriver(Driver):
                 self.exit_event.set()
                 if self._key_thread is not None:
                     self._key_thread.join()
+                self.exit_event.clear()
                 termios.tcflush(self.fileno, termios.TCIFLUSH)
         except Exception as error:
             # TODO: log this
@@ -236,17 +237,3 @@ class LinuxDriver(Driver):
         finally:
             with timer("selector.close"):
                 selector.close()
-
-
-if __name__ == "__main__":
-    from rich.console import Console
-
-    console = Console()
-
-    from ..app import App
-
-    class MyApp(App):
-        async def on_mount(self, event: events.Mount) -> None:
-            self.set_timer(5, callback=self._close_messages)
-
-    MyApp.run()

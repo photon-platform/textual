@@ -209,12 +209,12 @@ class StylesBase(ABC):
     node: DOMNode | None = None
 
     display = StringEnumProperty(VALID_DISPLAY, "block", layout=True)
-    visibility = StringEnumProperty(VALID_VISIBILITY, "visible")
+    visibility = StringEnumProperty(VALID_VISIBILITY, "visible", layout=True)
     layout = LayoutProperty()
 
     auto_color = BooleanProperty(default=False)
     color = ColorProperty(Color(255, 255, 255))
-    background = ColorProperty(Color(0, 0, 0, 0), background=True)
+    background = ColorProperty(Color(0, 0, 0, 0))
     text_style = StyleFlagsProperty()
 
     opacity = FractionalProperty()
@@ -300,6 +300,44 @@ class StylesBase(ABC):
     link_hover_background = ColorProperty("transparent")
     link_hover_style = StyleFlagsProperty()
 
+    def __textual_animation__(
+        self,
+        attribute: str,
+        start_value: object,
+        value: object,
+        start_time: float,
+        duration: float | None,
+        speed: float | None,
+        easing: EasingFunction,
+        on_complete: CallbackType | None = None,
+    ) -> ScalarAnimation | None:
+        if self.node is None:
+            return None
+
+        # Check we are animating a Scalar or Scalar offset
+        if isinstance(start_value, (Scalar, ScalarOffset)):
+
+            # If destination is a number, we can convert that to a scalar
+            if isinstance(value, (int, float)):
+                value = Scalar(value, Unit.CELLS, Unit.CELLS)
+
+            # We can only animate to Scalar
+            if not isinstance(value, (Scalar, ScalarOffset)):
+                return None
+
+            return ScalarAnimation(
+                self.node,
+                self,
+                start_time,
+                attribute,
+                value,
+                duration=duration,
+                speed=speed,
+                easing=easing,
+                on_complete=on_complete,
+            )
+        return None
+
     def __eq__(self, styles: object) -> bool:
         """Check that Styles contains the same rules."""
         if not isinstance(styles, StylesBase):
@@ -313,8 +351,7 @@ class StylesBase(ABC):
         Returns:
             Spacing: Space around widget content.
         """
-        spacing = self.padding + self.border.spacing
-        return spacing
+        return self.padding + self.border.spacing
 
     @property
     def auto_dimensions(self) -> bool:
@@ -384,7 +421,7 @@ class StylesBase(ABC):
 
         Args:
             layout (bool, optional): Also require a layout. Defaults to False.
-            children (bool, opional): Also refresh children. Defaults to False.
+            children (bool, optional): Also refresh children. Defaults to False.
         """
 
     @abstractmethod
@@ -513,12 +550,29 @@ class StylesBase(ABC):
             self._align_height(height, parent_height),
         )
 
+    @property
+    def partial_rich_style(self) -> Style:
+        """Get the style properties associated with this node only (not including parents in the DOM).
+
+        Returns:
+            Style: Rich Style object.
+        """
+        style = Style(
+            color=(self.color.rich_color if self.has_rule("color") else None),
+            bgcolor=(
+                self.background.rich_color if self.has_rule("background") else None
+            ),
+        )
+        style += self.text_style
+        return style
+
 
 @rich.repr.auto
 @dataclass
 class Styles(StylesBase):
     node: DOMNode | None = None
     _rules: RulesMap = field(default_factory=dict)
+    _updates: int = 0
 
     important: set[str] = field(default_factory=set)
 
@@ -539,7 +593,10 @@ class Styles(StylesBase):
         Returns:
             bool: ``True`` if a rule was cleared, or ``False`` if it was already not set.
         """
-        return self._rules.pop(rule, None) is not None
+        changed = self._rules.pop(rule, None) is not None
+        if changed:
+            self._updates += 1
+        return changed
 
     def get_rules(self) -> RulesMap:
         return self._rules.copy()
@@ -555,10 +612,16 @@ class Styles(StylesBase):
             bool: ``True`` if the rule changed, otherwise ``False``.
         """
         if value is None:
-            return self._rules.pop(rule, None) is not None
+            changed = self._rules.pop(rule, None) is not None
+            if changed:
+                self._updates += 1
+            return changed
         current = self._rules.get(rule)
         self._rules[rule] = value
-        return current != value
+        changed = current != value
+        if changed:
+            self._updates += 1
+        return changed
 
     def get_rule(self, rule: str, default: object = None) -> object:
         return self._rules.get(rule, default)
@@ -572,6 +635,7 @@ class Styles(StylesBase):
 
     def reset(self) -> None:
         """Reset the rules to initial state."""
+        self._updates += 1
         self._rules.clear()
 
     def merge(self, other: Styles) -> None:
@@ -580,10 +644,11 @@ class Styles(StylesBase):
         Args:
             other (Styles): A Styles object.
         """
-
+        self._updates += 1
         self._rules.update(other._rules)
 
     def merge_rules(self, rules: RulesMap) -> None:
+        self._updates += 1
         self._rules.update(rules)
 
     def extract_rules(
@@ -626,30 +691,6 @@ class Styles(StylesBase):
                 yield name, getattr(self, name)
         if self.important:
             yield "important", self.important
-
-    def __textual_animation__(
-        self,
-        attribute: str,
-        value: Any,
-        start_time: float,
-        duration: float | None,
-        speed: float | None,
-        easing: EasingFunction,
-        on_complete: CallbackType | None = None,
-    ) -> ScalarAnimation | None:
-        if isinstance(value, ScalarOffset):
-            return ScalarAnimation(
-                self.node,
-                self,
-                start_time,
-                attribute,
-                value,
-                duration=duration,
-                speed=speed,
-                easing=easing,
-                on_complete=on_complete,
-            )
-        return None
 
     def _get_border_css_lines(
         self, rules: RulesMap, name: str
@@ -915,6 +956,18 @@ class RenderStyles(StylesBase):
         self._base_styles = base
         self._inline_styles = inline_styles
         self._animate: BoundAnimator | None = None
+        self._updates: int = 0
+        self._rich_style: tuple[int, Style] | None = None
+        self._gutter: tuple[int, Spacing] | None = None
+
+    @property
+    def _cache_key(self) -> int:
+        """A key key, that changes when any style is changed.
+
+        Returns:
+            int: An opaque integer.
+        """
+        return self._updates + self._base_styles._updates + self._inline_styles._updates
 
     @property
     def base(self) -> Styles:
@@ -932,10 +985,26 @@ class RenderStyles(StylesBase):
         assert self.node is not None
         return self.node.rich_style
 
+    @property
+    def gutter(self) -> Spacing:
+        """Get space around widget.
+
+        Returns:
+            Spacing: Space around widget content.
+        """
+        # This is (surprisingly) a bit of a bottleneck
+        if self._gutter is not None:
+            cache_key, gutter = self._gutter
+            if cache_key == self._cache_key:
+                return gutter
+        gutter = self.padding + self.border.spacing
+        self._gutter = (self._cache_key, gutter)
+        return gutter
+
     def animate(
         self,
         attribute: str,
-        value: float | Animatable,
+        value: str | float | Animatable,
         *,
         final_value: object = ...,
         duration: float | None = None,
@@ -958,6 +1027,7 @@ class RenderStyles(StylesBase):
 
         """
         if self._animate is None:
+            assert self.node is not None
             self._animate = self.node.app.animator.bind(self)
         assert self._animate is not None
         self._animate(
@@ -989,16 +1059,19 @@ class RenderStyles(StylesBase):
 
     def merge_rules(self, rules: RulesMap) -> None:
         self._inline_styles.merge_rules(rules)
+        self._updates += 1
 
     def reset(self) -> None:
         """Reset the rules to initial state."""
         self._inline_styles.reset()
+        self._updates += 1
 
     def has_rule(self, rule: str) -> bool:
         """Check if a rule has been set."""
         return self._inline_styles.has_rule(rule) or self._base_styles.has_rule(rule)
 
     def set_rule(self, rule: str, value: object | None) -> bool:
+        self._updates += 1
         return self._inline_styles.set_rule(rule, value)
 
     def get_rule(self, rule: str, default: object = None) -> object:
@@ -1008,6 +1081,7 @@ class RenderStyles(StylesBase):
 
     def clear_rule(self, rule_name: str) -> bool:
         """Clear a rule (from inline)."""
+        self._updates += 1
         return self._inline_styles.clear_rule(rule_name)
 
     def get_rules(self) -> RulesMap:
@@ -1023,25 +1097,3 @@ class RenderStyles(StylesBase):
         styles.merge(self._inline_styles)
         combined_css = styles.css
         return combined_css
-
-
-if __name__ == "__main__":
-    styles = Styles()
-
-    styles.display = "none"
-    styles.visibility = "hidden"
-    styles.border = ("solid", "rgb(10,20,30)")
-    styles.outline_right = ("solid", "red")
-    styles.text_style = "italic"
-    styles.dock = "bar"
-    styles.layers = "foo bar"
-
-    from rich import print
-
-    print(styles.text_style)
-    print(styles.text)
-
-    print(styles)
-    print(styles.css)
-
-    print(styles.extract_rules((0, 1, 0)))

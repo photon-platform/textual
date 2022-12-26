@@ -29,7 +29,7 @@ Sidebar {
 }
 
 Sidebar:focus-within {
-    offset: 0 0 !important;    
+    offset: 0 0 !important;
 }
 
 Sidebar.-hidden {
@@ -190,7 +190,7 @@ LocationLink {
     padding: 1 2;
     background: $boost;
     color: $text;  
-
+    box-sizing: content-box;
     content-align: center middle;
 }
 

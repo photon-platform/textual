@@ -26,6 +26,10 @@ UPDATE_PERIOD: Final[float] = 1 / 120
 class Screen(Widget):
     """A widget for the root of the app."""
 
+    # The screen is a special case and unless a class that inherits from us
+    # says otherwise, all screen-level bindings should be treated as having
+    # priority.
+
     DEFAULT_CSS = """
     Screen {
         layout: vertical;
@@ -290,38 +294,38 @@ class Screen(Widget):
             # No focus, so blur currently focused widget if it exists
             if self.focused is not None:
                 self.focused.post_message_no_wait(events.Blur(self))
-                self.focused.emit_no_wait(events.DescendantBlur(self))
                 self.focused = None
+            self.log.debug("focus was removed")
         elif widget.can_focus:
             if self.focused != widget:
                 if self.focused is not None:
                     # Blur currently focused widget
                     self.focused.post_message_no_wait(events.Blur(self))
-                    self.focused.emit_no_wait(events.DescendantBlur(self))
                 # Change focus
                 self.focused = widget
                 # Send focus event
                 if scroll_visible:
                     self.screen.scroll_to_widget(widget)
                 widget.post_message_no_wait(events.Focus(self))
-                widget.emit_no_wait(events.DescendantFocus(self))
+                self.log.debug(widget, "was focused")
 
     async def _on_idle(self, event: events.Idle) -> None:
         # Check for any widgets marked as 'dirty' (needs a repaint)
         event.prevent_default()
 
-        if self.is_current:
-            if self._layout_required:
-                self._refresh_layout()
-                self._layout_required = False
-                self._dirty_widgets.clear()
-            if self._repaint_required:
-                self._dirty_widgets.clear()
-                self._dirty_widgets.add(self)
-                self._repaint_required = False
+        async with self.app._dom_lock:
+            if self.is_current:
+                if self._layout_required:
+                    self._refresh_layout()
+                    self._layout_required = False
+                    self._dirty_widgets.clear()
+                if self._repaint_required:
+                    self._dirty_widgets.clear()
+                    self._dirty_widgets.add(self)
+                    self._repaint_required = False
 
-            if self._dirty_widgets:
-                self.update_timer.resume()
+                if self._dirty_widgets:
+                    self.update_timer.resume()
 
         # The Screen is idle - a good opportunity to invoke the scheduled callbacks
         await self._invoke_and_clear_callbacks()
@@ -378,8 +382,6 @@ class Screen(Widget):
 
             for widget in hidden:
                 widget.post_message_no_wait(Hide(self))
-            for widget in shown:
-                widget.post_message_no_wait(Show(self))
 
             # We want to send a resize event to widgets that were just added or change since last layout
             send_resize = shown | resized
@@ -400,11 +402,17 @@ class Screen(Widget):
                         ResizeEvent(self, region.size, virtual_size, container_size)
                     )
 
+            for widget in shown:
+                widget.post_message_no_wait(Show(self))
+
         except Exception as error:
             self.app._handle_exception(error)
             return
         display_update = self._compositor.render(full=full)
         self.app._display(self, display_update)
+        if not self.app._dom_ready:
+            self.app.post_message_no_wait(events.Ready(self))
+            self.app._dom_ready = True
 
     async def _on_update(self, message: messages.Update) -> None:
         message.stop()

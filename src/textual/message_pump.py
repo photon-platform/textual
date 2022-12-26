@@ -284,7 +284,7 @@ class MessagePump(metaclass=MessagePumpMeta):
     async def _on_close_messages(self, message: messages.CloseMessages) -> None:
         await self._close_messages()
 
-    async def _close_messages(self) -> None:
+    async def _close_messages(self, wait: bool = True) -> None:
         """Close message queue, and optionally wait for queue to finish processing."""
         if self._closed or self._closing:
             return
@@ -296,7 +296,7 @@ class MessagePump(metaclass=MessagePumpMeta):
         await self._message_queue.put(events.Unmount(sender=self))
         Reactive._reset_object(self)
         await self._message_queue.put(None)
-        if self._task is not None and asyncio.current_task() != self._task:
+        if wait and self._task is not None and asyncio.current_task() != self._task:
             # Ensure everything is closed before returning
             await self._task
 
@@ -593,12 +593,12 @@ class MessagePump(metaclass=MessagePumpMeta):
 
         handled = False
         invoked_method = None
-        key_name = event.key_name
+        key_name = event.name
         if not key_name:
             return False
 
-        for key_alias in event.key_aliases:
-            key_method = get_key_handler(self, key_alias)
+        for key_method_name in event.name_aliases:
+            key_method = get_key_handler(self, key_method_name)
             if key_method is not None:
                 if invoked_method:
                     _raise_duplicate_key_handlers_error(

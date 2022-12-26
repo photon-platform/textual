@@ -4,6 +4,7 @@ from typing import cast
 
 from rich.console import RenderableType
 from rich.highlighter import ReprHighlighter
+from rich.measure import measure_renderables
 from rich.pretty import Pretty
 from rich.protocol import is_renderable
 from rich.segment import Segment
@@ -60,11 +61,20 @@ class TextLog(ScrollView, can_focus=True):
     def _on_styles_updated(self) -> None:
         self._line_cache.clear()
 
-    def write(self, content: RenderableType | object) -> None:
+    def write(
+        self,
+        content: RenderableType | object,
+        width: int | None = None,
+        expand: bool = False,
+        shrink: bool = True,
+    ) -> None:
         """Write text or a rich renderable.
 
         Args:
             content (RenderableType): Rich renderable (or text).
+            width (int): Width to render or None to use optimal width. Defaults to `None`.
+            expand (bool): Enable expand to widget width, or False to use `width`. Defaults to `False`.
+            shrink (bool): Enable shrinking of content to fit width. Defaults to `True`.
         """
 
         renderable: RenderableType
@@ -73,22 +83,38 @@ class TextLog(ScrollView, can_focus=True):
         else:
             if isinstance(content, str):
                 if self.markup:
-                    content = Text.from_markup(content)
-                if self.highlight:
-                    renderable = self.highlighter(content)
+                    renderable = Text.from_markup(content)
                 else:
                     renderable = Text(content)
+                if self.highlight:
+                    renderable = self.highlighter(renderable)
             else:
                 renderable = cast(RenderableType, content)
 
         console = self.app.console
-        width = max(self.min_width, self.size.width or self.min_width)
+        render_options = console.options
 
-        render_options = console.options.update_width(width)
-        if not self.wrap:
+        if isinstance(renderable, Text) and not self.wrap:
             render_options = render_options.update(overflow="ignore", no_wrap=True)
-        segments = self.app.console.render(renderable, render_options.update_width(80))
+
+        render_width = measure_renderables(
+            console, render_options, [renderable]
+        ).maximum
+        container_width = (
+            self.scrollable_content_region.width if width is None else width
+        )
+
+        if expand and render_width < container_width:
+            render_width = container_width
+        if shrink and render_width > container_width:
+            render_width = container_width
+
+        segments = self.app.console.render(
+            renderable, render_options.update_width(render_width)
+        )
         lines = list(Segment.split_lines(segments))
+        if not lines:
+            return
 
         self.max_width = max(
             self.max_width,

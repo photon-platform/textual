@@ -5,11 +5,84 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/)
 and this project adheres to [Semantic Versioning](http://semver.org/).
 
-## [0.5.0] - Unreleased
+## [0.8.1] - 2022-12-25
 
+### Fixed
+
+- Fix for overflowing tree issue https://github.com/Textualize/textual/issues/1425
+
+## [0.8.0] - 2022-12-22
+
+### Fixed
+
+- Fixed issues with nested auto dimensions https://github.com/Textualize/textual/issues/1402
+- Fixed watch method incorrectly running on first set when value hasn't changed and init=False https://github.com/Textualize/textual/pull/1367
+- `App.dark` can now be set from `App.on_load` without an error being raised  https://github.com/Textualize/textual/issues/1369
+- Fixed setting `visibility` changes needing a `refresh` https://github.com/Textualize/textual/issues/1355
 
 ### Added
 
+- Added `textual.actions.SkipAction` exception which can be raised from an action to allow parents to process bindings.
+- Added `textual keys` preview.
+- Added ability to bind to a character in addition to key name. i.e. you can bind to "." or "full_stop".
+- Added TextLog.shrink attribute to allow renderable to reduce in size to fit width.
+
+### Changed
+
+- Deprecated `PRIORITY_BINDINGS` class variable.
+- Renamed `char` to `character` on Key event.
+- Renamed `key_name` to `name` on Key event.
+- Queries/`walk_children` no longer includes self in results by default https://github.com/Textualize/textual/pull/1416
+
+## [0.7.0] - 2022-12-17
+
+### Added
+
+- Added `PRIORITY_BINDINGS` class variable, which can be used to control if a widget's bindings have priority by default. https://github.com/Textualize/textual/issues/1343
+
+### Changed
+
+- Renamed the `Binding` argument `universal` to `priority`. https://github.com/Textualize/textual/issues/1343
+- When looking for bindings that have priority, they are now looked from `App` downwards. https://github.com/Textualize/textual/issues/1343
+- `BINDINGS` on an `App`-derived class have priority by default. https://github.com/Textualize/textual/issues/1343
+- `BINDINGS` on a `Screen`-derived class have priority by default. https://github.com/Textualize/textual/issues/1343
+- Added a message parameter to Widget.exit
+
+### Fixed
+
+- Fixed validator not running on first reactive set https://github.com/Textualize/textual/pull/1359
+- Ensure only printable characters are used as key_display https://github.com/Textualize/textual/pull/1361
+
+
+## [0.6.0] - 2022-12-11
+
+### Added
+
+- Added "inherited bindings" -- BINDINGS classvar will be merged with base classes, unless inherit_bindings is set to False
+- Added `Tree` widget which replaces `TreeControl`.
+- Added widget `Placeholder` https://github.com/Textualize/textual/issues/1200.
+
+### Changed
+
+- Rebuilt `DirectoryTree` with new `Tree` control.
+- Empty containers with a dimension set to `"auto"` will now collapse instead of filling up the available space.
+- Container widgets now have default height of `1fr`.
+- The default `width` of a `Label` is now `auto`.
+
+### Fixed
+
+- Type selectors can now contain numbers https://github.com/Textualize/textual/issues/1253
+- Fixed visibility not affecting children https://github.com/Textualize/textual/issues/1313
+- Fixed issue with auto width/height and relative children https://github.com/Textualize/textual/issues/1319
+- Fixed issue with offset applied to containers https://github.com/Textualize/textual/issues/1256
+- Fixed default CSS retrieval for widgets with no `DEFAULT_CSS` that inherited from widgets with `DEFAULT_CSS` https://github.com/Textualize/textual/issues/1335
+- Fixed merging of `BINDINGS` when binding inheritance is set to `None` https://github.com/Textualize/textual/issues/1351
+
+## [0.5.0] - 2022-11-20
+
+### Added
+
+- Add get_child_by_id and get_widget_by_id, remove get_child https://github.com/Textualize/textual/pull/1146
 - Add easing parameter to Widget.scroll_* methods https://github.com/Textualize/textual/pull/1144
 - Added Widget.call_later which invokes a callback on idle.
 - `DOMNode.ancestors` no longer includes `self`.
@@ -21,17 +94,30 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 - It is now possible to `await` a `Widget.remove`.
   https://github.com/Textualize/textual/issues/1094
 - It is now possible to `await` a `DOMQuery.remove`. Note that this changes
-  the return value of `DOMQuery.remove`, which uses to return `self`.
+  the return value of `DOMQuery.remove`, which used to return `self`.
   https://github.com/Textualize/textual/issues/1094
+- Added Pilot.wait_for_animation
+- Added `Widget.move_child` https://github.com/Textualize/textual/issues/1121
+- Added a `Label` widget https://github.com/Textualize/textual/issues/1190
+- Support lazy-instantiated Screens (callables in App.SCREENS) https://github.com/Textualize/textual/pull/1185
+- Display of keys in footer has more sensible defaults https://github.com/Textualize/textual/pull/1213
+- Add App.get_key_display, allowing custom key_display App-wide https://github.com/Textualize/textual/pull/1213
 
 ### Changed
 
 - Watchers are now called immediately when setting the attribute if they are synchronous. https://github.com/Textualize/textual/pull/1145
 - Widget.call_later has been renamed to Widget.call_after_refresh.
+- Button variant values are now checked at runtime. https://github.com/Textualize/textual/issues/1189
+- Added caching of some properties in Styles object
 
 ### Fixed
 
 - Fixed DataTable row not updating after add https://github.com/Textualize/textual/issues/1026
+- Fixed issues with animation. Now objects of different types may be animated.
+- Fixed containers with transparent background not showing borders https://github.com/Textualize/textual/issues/1175
+- Fixed auto-width in horizontal containers https://github.com/Textualize/textual/pull/1155
+- Fixed Input cursor invisible when placeholder empty https://github.com/Textualize/textual/pull/1202
+- Fixed deadlock when removing widgets from the App https://github.com/Textualize/textual/pull/1219
 
 ## [0.4.0] - 2022-11-08
 
@@ -210,6 +296,9 @@ https://textual.textualize.io/blog/2022/11/08/version-040/#version-040
 - New handler system for messages that doesn't require inheritance
 - Improved traceback handling
 
+[0.7.0]: https://github.com/Textualize/textual/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/Textualize/textual/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/Textualize/textual/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Textualize/textual/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Textualize/textual/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/Textualize/textual/compare/v0.2.0...v0.2.1

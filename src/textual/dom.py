@@ -28,7 +28,6 @@ from .css._error_tools import friendly_list
 from .css.constants import VALID_DISPLAY, VALID_VISIBILITY
 from .css.errors import DeclarationError, StyleValueError
 from .css.parse import parse_declarations
-from .css.query import NoMatches
 from .css.styles import RenderStyles, Styles
 from .css.tokenize import IDENTIFIER
 from .message_pump import MessagePump
@@ -98,8 +97,15 @@ class DOMNode(MessagePump):
 
     # True if this node inherits the CSS from the base class.
     _inherit_css: ClassVar[bool] = True
+
+    # True to inherit bindings from base class
+    _inherit_bindings: ClassVar[bool] = True
+
     # List of names of base classes that inherit CSS
     _css_type_names: ClassVar[frozenset[str]] = frozenset()
+
+    # Generated list of bindings
+    _merged_bindings: ClassVar[Bindings] | None = None
 
     def __init__(
         self,
@@ -128,7 +134,7 @@ class DOMNode(MessagePump):
         self._auto_refresh: float | None = None
         self._auto_refresh_timer: Timer | None = None
         self._css_types = {cls.__name__ for cls in self._css_bases(self.__class__)}
-        self._bindings = Bindings(self.BINDINGS)
+        self._bindings = self._merged_bindings or Bindings()
         self._has_hover_style: bool = False
         self._has_focus_within: bool = False
 
@@ -153,12 +159,16 @@ class DOMNode(MessagePump):
         """Perform an automatic refresh (set with auto_refresh property)."""
         self.refresh()
 
-    def __init_subclass__(cls, inherit_css: bool = True) -> None:
+    def __init_subclass__(
+        cls, inherit_css: bool = True, inherit_bindings: bool = True
+    ) -> None:
         super().__init_subclass__()
         cls._inherit_css = inherit_css
+        cls._inherit_bindings = inherit_bindings
         css_type_names: set[str] = set()
         for base in cls._css_bases(cls):
             css_type_names.add(base.__name__)
+        cls._merged_bindings = cls._merge_bindings()
         cls._css_type_names = frozenset(css_type_names)
 
     def get_component_styles(self, name: str) -> RenderStyles:
@@ -206,6 +216,32 @@ class DOMNode(MessagePump):
             else:
                 break
 
+    @classmethod
+    def _merge_bindings(cls) -> Bindings:
+        """Merge bindings from base classes.
+
+        Returns:
+            Bindings: Merged bindings.
+        """
+        bindings: list[Bindings] = []
+
+        # To start with, assume that bindings won't be priority bindings.
+        priority = False
+
+        for base in reversed(cls.__mro__):
+            if issubclass(base, DOMNode):
+                if not base._inherit_bindings:
+                    bindings.clear()
+                bindings.append(
+                    Bindings(
+                        base.__dict__.get("BINDINGS", []),
+                    )
+                )
+        keys = {}
+        for bindings_ in bindings:
+            keys.update(bindings_.keys)
+        return Bindings(keys.values())
+
     def _post_register(self, app: App) -> None:
         """Called when the widget is registered
 
@@ -237,7 +273,7 @@ class DOMNode(MessagePump):
                 return f"{base.__name__}"
 
         for tie_breaker, base in enumerate(self._node_bases):
-            css = base.DEFAULT_CSS.strip()
+            css = base.__dict__.get("DEFAULT_CSS", "").strip()
             if css:
                 css_stack.append((get_path(base), css, -tie_breaker))
 
@@ -260,7 +296,7 @@ class DOMNode(MessagePump):
         from .screen import Screen
 
         node = self
-        while node and not isinstance(node, Screen):
+        while node is not None and not isinstance(node, Screen):
             node = node._parent
         if not isinstance(node, Screen):
             raise NoScreen("node has no screen")
@@ -478,8 +514,8 @@ class DOMNode(MessagePump):
     @property
     def rich_style(self) -> Style:
         """Get a Rich Style object for this DOMNode."""
-        background = WHITE
-        color = BLACK
+        background = Color(0, 0, 0, 0)
+        color = Color(255, 255, 255, 0)
         style = Style()
         for node in reversed(self.ancestors_with_self):
             styles = node.styles
@@ -491,7 +527,8 @@ class DOMNode(MessagePump):
             if styles.has_rule("auto_color") and styles.auto_color:
                 color = background.get_contrast_text(color.a)
         style += Style.from_color(
-            (background + color).rich_color, background.rich_color
+            (background + color).rich_color if (background.a or color.a) else None,
+            background.rich_color if background.a else None,
         )
         return style
 
@@ -575,7 +612,7 @@ class DOMNode(MessagePump):
         """Reset styles back to their initial state"""
         from .widget import Widget
 
-        for node in self.walk_children():
+        for node in self.walk_children(with_self=True):
             node._css_styles.reset()
             if isinstance(node, Widget):
                 node._set_dirty()
@@ -608,7 +645,7 @@ class DOMNode(MessagePump):
         self,
         filter_type: type[WalkType],
         *,
-        with_self: bool = True,
+        with_self: bool = False,
         method: WalkMethod = "depth",
         reverse: bool = False,
     ) -> list[WalkType]:
@@ -618,7 +655,7 @@ class DOMNode(MessagePump):
     def walk_children(
         self,
         *,
-        with_self: bool = True,
+        with_self: bool = False,
         method: WalkMethod = "depth",
         reverse: bool = False,
     ) -> list[DOMNode]:
@@ -628,16 +665,16 @@ class DOMNode(MessagePump):
         self,
         filter_type: type[WalkType] | None = None,
         *,
-        with_self: bool = True,
+        with_self: bool = False,
         method: WalkMethod = "depth",
         reverse: bool = False,
     ) -> list[DOMNode] | list[WalkType]:
-        """Generate descendant nodes.
+        """Walk the subtree rooted at this node, and return every descendant encountered in a list.
 
         Args:
             filter_type (type[WalkType] | None, optional): Filter only this type, or None for no filter.
                 Defaults to None.
-            with_self (bool, optional): Also yield self in addition to descendants. Defaults to True.
+            with_self (bool, optional): Also yield self in addition to descendants. Defaults to False.
             method (Literal["breadth", "depth"], optional): One of "depth" or "breadth". Defaults to "depth".
             reverse (bool, optional): Reverse the order (bottom up). Defaults to False.
 
@@ -645,7 +682,6 @@ class DOMNode(MessagePump):
             list[DOMNode] | list[WalkType]: A list of nodes.
 
         """
-
         check_type = filter_type or DOMNode
 
         node_generator = (
@@ -660,23 +696,6 @@ class DOMNode(MessagePump):
         if reverse:
             nodes.reverse()
         return cast("list[DOMNode]", nodes)
-
-    def get_child(self, id: str) -> DOMNode:
-        """Return the first child (immediate descendent) of this node with the given ID.
-
-        Args:
-            id (str): The ID of the child.
-
-        Returns:
-            DOMNode: The first child of this node with the ID.
-
-        Raises:
-            NoMatches: if no children could be found for this ID
-        """
-        for child in self.children:
-            if child.id == id:
-                return child
-        raise NoMatches(f"No child found with id={id!r}")
 
     ExpectType = TypeVar("ExpectType", bound="Widget")
 
