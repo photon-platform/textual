@@ -51,7 +51,7 @@ class CodeBrowser(App):
                 line_numbers=True,
                 word_wrap=False,
                 indent_guides=True,
-                theme="github-dark",
+                theme="gruvbox-dark",
             )
         except Exception:
             code_view.update(Traceback(theme="github-dark", width=None))
